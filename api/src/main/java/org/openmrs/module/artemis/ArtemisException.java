@@ -9,13 +9,22 @@
  */
 package org.openmrs.module.artemis;
 
-public class ArtemisException extends RuntimeException {
-	
+import org.openmrs.event.EventException;
+
+public class ArtemisException extends EventException {
+
+	public ArtemisException() {
+	}
+
+	public ArtemisException(String message) {
+		super(message);
+	}
+
 	public ArtemisException(String message, Throwable cause) {
 		super(message, cause);
 	}
-	
-	public ArtemisException(String message) {
-		super(message);
+
+	public ArtemisException(Throwable cause) {
+		super(cause);
 	}
 }

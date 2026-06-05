@@ -9,9 +9,12 @@
  */
 package org.openmrs.module.artemis;
 
-import org.apache.activemq.artemis.core.config.Configuration;
 import org.apache.activemq.artemis.core.config.impl.ConfigurationImpl;
+import org.apache.activemq.artemis.core.remoting.server.RemotingService;
 import org.apache.activemq.artemis.core.server.embedded.EmbeddedActiveMQ;
+import org.apache.activemq.artemis.spi.core.remoting.Acceptor;
+import org.openmrs.GlobalProperty;
+import org.openmrs.api.AdministrationService;
 import org.openmrs.api.context.Context;
 import org.openmrs.event.EventPublisher;
 import org.openmrs.scheduler.TaskContext;
@@ -22,18 +25,32 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.net.InetAddress;
 
 @Component("artemis.ArtemisTask")
 public class ArtemisTask implements TaskHandler<ArtemisTaskData> {
 	
 	private static final Logger log = LoggerFactory.getLogger(ArtemisTask.class);
+
+	public final String ARTEMIS_URI_GP = "artemis.uri";
 	
 	@Autowired(required = false)
 	private EventPublisher eventPublisher;
+
+	@Autowired(required = false)
+	private AdministrationService adminService;
 	
 	private EmbeddedActiveMQ embeddedActiveMQ;
 
 	public ArtemisTask() {
+	}
+
+	public String getBrokerUri() {
+		if (embeddedActiveMQ != null) {
+			return "vm://0"; //Use in-vm
+		} else {
+			return Context.getRuntimeProperties().getProperty("artemis.uri", adminService.getGlobalProperty(ARTEMIS_URI_GP));
+		}
 	}
 
 	@Override
@@ -43,8 +60,9 @@ public class ArtemisTask implements TaskHandler<ArtemisTaskData> {
 
 			ConfigurationImpl config = new ConfigurationImpl()
 					.addAcceptorConfiguration("in-vm", "vm://0")
-					.addAcceptorConfiguration("tcp", "tcp://0.0.0.0:61616")
-					.setSecurityEnabled(false);
+					.addAcceptorConfiguration("tcp", "tcp://0.0.0.0:0") // assign a random free port
+					.setSecurityEnabled(false)
+					.setJMXManagementEnabled(true);
 
 			config.parsePrefixedProperties(Context.getRuntimeProperties(), "artemis.");
 			
@@ -52,7 +70,33 @@ public class ArtemisTask implements TaskHandler<ArtemisTaskData> {
 			embeddedActiveMQ.setConfiguration(config);
 			embeddedActiveMQ.start();
 			
-			log.info("Embedded Artemis broker started successfully.");
+			int actualPort = 61616;
+			try {
+				RemotingService remotingService = embeddedActiveMQ.getActiveMQServer().getRemotingService();
+				Acceptor tcpAcceptor = remotingService.getAcceptor("tcp");
+				if (tcpAcceptor != null) {
+					actualPort = tcpAcceptor.getActualPort();
+				}
+			} catch (Exception e) {
+				log.warn("Could not determine actual Artemis port, falling back to 61616", e);
+			}
+
+			String hostAddress = "localhost";
+			try {
+				hostAddress = InetAddress.getLocalHost().getHostAddress();
+			} catch (Exception e) {
+				log.warn("Could not determine local IP address, falling back to localhost", e);
+			}
+
+			adminService.saveGlobalProperty(new GlobalProperty(ARTEMIS_URI_GP, "tcp://" + hostAddress + ":" + actualPort));
+
+			log.info("Embedded Artemis broker started successfully. Starting to monitor it...");
+
+			// Loop and hold execution as long as the underlying server is reporting active
+			while (embeddedActiveMQ.getActiveMQServer().isActive()) {
+				// Thread sleep prevents high CPU utilization from the loop
+				Thread.sleep(1000);
+			}
 		}
 	}
 
@@ -60,6 +104,7 @@ public class ArtemisTask implements TaskHandler<ArtemisTaskData> {
 	public void stop() throws Exception {
 		if (embeddedActiveMQ != null) {
 			log.info("Stopping embedded Artemis broker...");
+			adminService.saveGlobalProperty(new GlobalProperty(ARTEMIS_URI_GP, ""));
 			embeddedActiveMQ.stop();
 			log.info("Embedded Artemis broker stopped.");
 		}
